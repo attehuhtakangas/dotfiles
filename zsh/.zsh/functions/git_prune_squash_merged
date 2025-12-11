@@ -3,10 +3,11 @@
 # This function uses git for-each-ref instead of parsing git branch output
 # to avoid issues with formatted output, worktrees, and special characters.
 #
-# Usage: git_prune_squash_merged [--dry-run|-n|--help|-h]
+# Usage: git_prune_squash_merged [--dry-run|-n|--yes|-y|--help|-h]
 #
 # Options:
 #   --dry-run, -n    Show what would be deleted without actually deleting
+#   --yes, -y        Skip confirmation prompt
 #   --help, -h       Show this help message
 #
 # Protected branches: main, master, develop, production (and current branch)
@@ -20,10 +21,11 @@ git_prune_squash_merged() {
   if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     echo "git_prune_squash_merged - Safely delete merged and squash-merged branches"
     echo ""
-    echo "Usage: git_prune_squash_merged [--dry-run|-n|--help|-h]"
+    echo "Usage: git_prune_squash_merged [--dry-run|-n|--yes|-y|--help|-h]"
     echo ""
     echo "Options:"
     echo "  --dry-run, -n    Show what would be deleted without actually deleting"
+    echo "  --yes, -y        Skip confirmation prompt"
     echo "  --help, -h       Show this help message"
     echo ""
     echo "Features:"
@@ -35,7 +37,8 @@ git_prune_squash_merged() {
     echo ""
     echo "Examples:"
     echo "  git_prune_squash_merged --dry-run    # Preview what would be deleted"
-    echo "  git_prune_squash_merged              # Actually delete merged branches"
+    echo "  git_prune_squash_merged              # Delete with confirmation"
+    echo "  git_prune_squash_merged --yes        # Delete without confirmation"
     echo "  gpsm --dry-run                       # Using alias"
     return 0
   fi
@@ -50,138 +53,160 @@ git_prune_squash_merged() {
   local protected_branches=(${GIT_PRUNE_PROTECTED_BRANCHES:-"main" "master" "develop" "production"})
   local current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
   local dry_run=false
+  local skip_confirm=false
 
   # Parse arguments
-  if [[ "$1" == "--dry-run" || "$1" == "-n" ]]; then
-    dry_run=true
-    echo "🔍 DRY RUN: Analyzing merged branches (no branches will be deleted)..."
-  else
-    echo "🚀 Analyzing and deleting merged branches..."
-  fi
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run|-n)
+        dry_run=true
+        shift
+        ;;
+      --yes|-y)
+        skip_confirm=true
+        shift
+        ;;
+      *)
+        echo "❌ Unknown option: $1"
+        echo "Run with --help for usage information"
+        return 1
+        ;;
+    esac
+  done
 
+  echo "🔍 Analyzing merged branches..."
   echo "Current branch: $current_branch"
   echo "Protected branches: ${protected_branches[@]}"
   echo ""
 
-  local deleted_count=0
-  local skipped_count=0
+  # Arrays to collect branches to delete
+  local -a merged_branches=()
+  local -a squash_merged_branches=()
 
-  # Step 1: Delete normally merged branches using git for-each-ref (safer than parsing git branch output)
-  echo "📋 Step 1: Processing normally merged branches..."
-  git for-each-ref --format='%(refname:short)%00%(worktreepath)' --merged=HEAD refs/heads/ | while IFS=$'\0' read -r branch worktree_path; do
-    # Skip if branch is empty (shouldn't happen, but safety first)
+  # Step 1: Find normally merged branches
+  echo "📋 Step 1: Finding normally merged branches..."
+  while IFS=$'\0' read -r branch worktree_path; do
     [[ -z "$branch" ]] && continue
+    [[ "$branch" == "$current_branch" ]] && continue
 
-    # Skip current branch
-    if [[ "$branch" == "$current_branch" ]]; then
-      echo "⏭️  Skipping current branch: $branch"
-      ((skipped_count++))
-      continue
-    fi
-
-    # Skip protected branches
     local is_protected=false
     for protected in "${protected_branches[@]}"; do
-      if [[ "$branch" == "$protected" ]]; then
-        echo "🔒 Skipping protected branch: $branch"
-        is_protected=true
-        ((skipped_count++))
-        break
-      fi
+      [[ "$branch" == "$protected" ]] && is_protected=true && break
     done
     [[ "$is_protected" == true ]] && continue
+    [[ -n "$worktree_path" ]] && continue
 
-    # Skip branches with worktrees
-    if [[ -n "$worktree_path" ]]; then
-      echo "🌳 Skipping worktree branch: $branch (worktree: $worktree_path)"
-      ((skipped_count++))
-      continue
-    fi
-
-    # This branch is safe to delete
-    if [[ "$dry_run" == true ]]; then
-      echo "✅ Would delete merged branch: $branch"
-    else
-      echo "🗑️  Deleting merged branch: $branch"
-      if git branch -d "$branch" 2>/dev/null; then
-        ((deleted_count++))
-      else
-        echo "   ⚠️  Failed to delete $branch (may have unmerged changes)"
-      fi
-    fi
-  done
+    merged_branches+=("$branch")
+  done < <(git for-each-ref --format='%(refname:short)%00%(worktreepath)' --merged=HEAD refs/heads/)
 
   echo ""
-  echo "📋 Step 2: Processing squash-merged branches..."
+  echo "📋 Step 2: Finding squash-merged branches..."
 
-  # Step 2: Handle squash-merged branches (branches that were squashed but not normally merged)
-  # Switch to main branch temporarily for squash-merge detection
+  # Step 2: Find squash-merged branches
   local original_branch=$current_branch
   if [[ "$current_branch" != "main" ]]; then
-    echo "🔄 Temporarily switching to main branch for squash-merge detection..."
-    git checkout -q main
+    git checkout -q main 2>/dev/null
   fi
 
-  # Get all local branches that are NOT already merged (these might be squash-merged)
-  git for-each-ref --format='%(refname:short)%00%(worktreepath)' refs/heads/ | while IFS=$'\0' read -r branch worktree_path; do
+  while IFS=$'\0' read -r branch worktree_path; do
     [[ -z "$branch" ]] && continue
-    [[ "$branch" == "main" ]] && continue  # Skip main branch
+    [[ "$branch" == "main" ]] && continue
 
-    # Skip protected branches
     local is_protected=false
     for protected in "${protected_branches[@]}"; do
-      if [[ "$branch" == "$protected" ]]; then
-        is_protected=true
-        break
-      fi
+      [[ "$branch" == "$protected" ]] && is_protected=true && break
     done
     [[ "$is_protected" == true ]] && continue
+    [[ -n "$worktree_path" ]] && continue
 
-    # Skip branches with worktrees
-    if [[ -n "$worktree_path" ]]; then
-      continue
-    fi
+    # Skip if already merged (handled in step 1)
+    git merge-base --is-ancestor "$branch" HEAD 2>/dev/null && continue
 
-    # Skip if this branch is already merged (handled in step 1)
-    if git merge-base --is-ancestor "$branch" HEAD > /dev/null 2>&1; then
-      continue
-    fi
-
-    # Check if this branch was squash-merged
+    # Check if squash-merged
     local merge_base=$(git merge-base main "$branch" 2>/dev/null)
     if [[ -n "$merge_base" ]]; then
       local commit_tree=$(git commit-tree $(git rev-parse "$branch^{tree}") -p "$merge_base" -m "_" 2>/dev/null)
       if [[ -n "$commit_tree" ]] && [[ $(git cherry main "$commit_tree" 2>/dev/null) == "-"* ]]; then
-        # This branch was squash-merged
-        if [[ "$dry_run" == true ]]; then
-          echo "✅ Would delete squash-merged branch: $branch"
-        else
-          echo "🗑️  Deleting squash-merged branch: $branch"
-          if git branch -D "$branch" 2>/dev/null; then  # Use -D for squash-merged branches
-            ((deleted_count++))
-          else
-            echo "   ⚠️  Failed to delete $branch"
-          fi
-        fi
+        squash_merged_branches+=("$branch")
       fi
     fi
-  done
+  done < <(git for-each-ref --format='%(refname:short)%00%(worktreepath)' refs/heads/)
 
   # Switch back to original branch
   if [[ "$current_branch" != "main" ]] && [[ "$original_branch" != "main" ]]; then
-    echo "🔄 Switching back to original branch: $original_branch"
-    git checkout -q "$original_branch"
+    git checkout -q "$original_branch" 2>/dev/null
+  fi
+
+  # Show results
+  echo ""
+  local total_count=$(( ${#merged_branches[@]} + ${#squash_merged_branches[@]} ))
+
+  if [[ $total_count -eq 0 ]]; then
+    echo "✨ No merged branches to delete."
+    return 0
+  fi
+
+  echo "Found $total_count branch(es) to delete:"
+  echo ""
+
+  if [[ ${#merged_branches[@]} -gt 0 ]]; then
+    echo "Merged branches:"
+    for branch in "${merged_branches[@]}"; do
+      echo "  • $branch"
+    done
+  fi
+
+  if [[ ${#squash_merged_branches[@]} -gt 0 ]]; then
+    echo "Squash-merged branches:"
+    for branch in "${squash_merged_branches[@]}"; do
+      echo "  • $branch"
+    done
   fi
 
   echo ""
+
+  # Dry run: just show what would be deleted
   if [[ "$dry_run" == true ]]; then
     echo "🔍 DRY RUN complete. Run without --dry-run to actually delete branches."
-  else
-    echo "🏁 Branch cleanup complete!"
-    if [[ $deleted_count -gt 0 ]]; then
-      echo "   ✅ Deleted $deleted_count branches"
-    else
-      echo "   ℹ️  No branches were deleted"
+    return 0
+  fi
+
+  # Ask for confirmation unless --yes was passed
+  if [[ "$skip_confirm" != true ]]; then
+    echo -n "Delete these $total_count branch(es)? [y/N] "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+      echo "❌ Aborted."
+      return 0
     fi
   fi
+
+  echo ""
+  echo "🗑️  Deleting branches..."
+
+  local deleted_count=0
+
+  # Delete merged branches
+  for branch in "${merged_branches[@]}"; do
+    if git branch -d "$branch" 2>/dev/null; then
+      echo "  ✅ Deleted: $branch"
+      ((deleted_count++))
+    else
+      echo "  ⚠️  Failed to delete: $branch"
+    fi
+  done
+
+  # Delete squash-merged branches (need -D since not technically merged)
+  for branch in "${squash_merged_branches[@]}"; do
+    if git branch -D "$branch" 2>/dev/null; then
+      echo "  ✅ Deleted: $branch"
+      ((deleted_count++))
+    else
+      echo "  ⚠️  Failed to delete: $branch"
+    fi
+  done
+
+  echo ""
+  echo "🏁 Branch cleanup complete!"
+  echo "   ✅ Deleted $deleted_count of $total_count branches"
 }

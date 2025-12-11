@@ -54,11 +54,29 @@ push_stack() {
     fi
   fi
 
+  # Get branches checked out in other worktrees (exclude from stack candidates)
+  local worktree_branches=()
+  local current_worktree=$(git rev-parse --show-toplevel)
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+      local wt_path="${match[1]}"
+    elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+      local wt_branch="${match[1]}"
+      # Exclude branches from OTHER worktrees (not the current one)
+      if [[ "$wt_path" != "$current_worktree" ]]; then
+        worktree_branches+=("$wt_branch")
+      fi
+    fi
+  done < <(git worktree list --porcelain 2>/dev/null)
+
   # Get the list of branches from current to base using a different approach
   local branch_stack_file=$(mktemp)
   local temp_branch=$current_branch
 
   echo "📋 Building branch stack..."
+  if [[ ${#worktree_branches[@]} -gt 0 ]]; then
+    echo "  ℹ️  Excluding ${#worktree_branches[@]} worktree branches from stack detection"
+  fi
 
   while [[ "$temp_branch" != "$base_branch" ]]; do
     echo "$temp_branch" >> "$branch_stack_file"
@@ -69,8 +87,21 @@ push_stack() {
     best_candidate=""
     min_distance=9999
 
-    # Get all local branches except current
-    candidate_branches=($(git branch --format='%(refname:short)' | grep -v "^$temp_branch$"))
+    # Get all local branches except current, excluding worktree branches
+    local all_branches=($(git branch --format='%(refname:short)' | grep -v "^$temp_branch$"))
+    local candidate_branches=()
+    for branch in "${all_branches[@]}"; do
+      local is_worktree=false
+      for wt_branch in "${worktree_branches[@]}"; do
+        if [[ "$branch" == "$wt_branch" ]]; then
+          is_worktree=true
+          break
+        fi
+      done
+      if ! $is_worktree; then
+        candidate_branches+=("$branch")
+      fi
+    done
 
     # Find the branch with the most recent common ancestor
     for candidate in "${candidate_branches[@]}"; do

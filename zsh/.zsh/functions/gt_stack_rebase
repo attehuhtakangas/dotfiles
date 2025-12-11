@@ -1,5 +1,5 @@
 gt_stack_rebase() {
-  if [[ "$1" == "-h" && "$1" == "--help" ]]; then
+  if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: gt_stack_rebase [checkout|install] [edit-msg]"
     echo " checkout - checks out pnpm-lock.yaml from main and runs pnpm i"
     echo " install - runs pnpm i and lets pnpm resolve the conflicts"
