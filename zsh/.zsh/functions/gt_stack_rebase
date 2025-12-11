@@ -1,25 +1,78 @@
 gt_stack_rebase() {
   if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: gt_stack_rebase [checkout|install] [edit-msg]"
-    echo " checkout - checks out pnpm-lock.yaml from main and runs pnpm i"
-    echo " install - runs pnpm i and lets pnpm resolve the conflicts"
-    echo " edit-msg to edit the messages"
-    return 1
-  fi
-  should_checkout=true
-  if [[ "$1" == "install" ]]; then
-    should_checkout=false
+    echo "Usage: gt_stack_rebase [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  checkout    Check out pnpm-lock.yaml from main and run pnpm i (default)"
+    echo "  install     Run pnpm i and let pnpm resolve the conflicts"
+    echo "  --edit-msg  Edit commit messages during rebase"
+    echo "  --dry-run   Show what would be done without making changes"
+    echo ""
+    echo "Examples:"
+    echo "  gt_stack_rebase              # Auto-resolve pnpm-lock conflicts"
+    echo "  gt_stack_rebase install      # Use pnpm to resolve conflicts"
+    echo "  gt_stack_rebase --dry-run    # Preview conflict resolution"
+    return 0
   fi
 
-  edit_msg=false
-  if [[ "$3" == "edit-msg" ]]; then
-    edit_msg=true
+  local should_checkout=true
+  local edit_msg=false
+  local dry_run=false
+
+  # Parse arguments
+  for arg in "$@"; do
+    case $arg in
+      checkout)
+        should_checkout=true
+        ;;
+      install)
+        should_checkout=false
+        ;;
+      --edit-msg|edit-msg)
+        edit_msg=true
+        ;;
+      --dry-run)
+        dry_run=true
+        ;;
+    esac
+  done
+
+  if $dry_run; then
+    echo "🔍 DRY RUN: Checking rebase state..."
   fi
+
+  local iteration=0
   while git rebase --show-current-patch &> /dev/null; do
+    ((iteration++))
     # Get list of files with merge conflicts
-    CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+    local conflict_files=$(git diff --name-only --diff-filter=U)
+
+    if $dry_run; then
+      echo ""
+      echo "[$iteration] Conflict detected:"
+      echo "  Files: ${conflict_files:-none}"
+    fi
+
     # Check if the only conflict is in the pnpm-lock.yaml
-    if [[ "$CONFLICT_FILES" == "pnpm-lock.yaml" ]]; then
+    if [[ "$conflict_files" == "pnpm-lock.yaml" ]]; then
+      if $dry_run; then
+        echo "  ✅ Only pnpm-lock.yaml conflict - would auto-resolve"
+        if $should_checkout; then
+          echo "  📋 Would run: git checkout main pnpm-lock.yaml"
+        fi
+        echo "  📋 Would run: pnpm i"
+        echo "  📋 Would run: git add pnpm-lock.yaml"
+        if $edit_msg; then
+          echo "  📋 Would run: git rebase --continue (with editor)"
+        else
+          echo "  📋 Would run: git rebase --continue (skip editor)"
+        fi
+        echo ""
+        echo "🔍 DRY RUN: Cannot continue simulation without actual rebase"
+        echo "💡 Run without --dry-run to perform the rebase"
+        return 0
+      fi
+
       echo "Resolving merge conflict in pnpm-lock.yaml..."
       # Resolve the conflict
       if $should_checkout; then
@@ -35,9 +88,19 @@ gt_stack_rebase() {
       fi
     else
       # Stop the script for manual conflict resolution
+      if $dry_run; then
+        echo "  ❌ Non-pnpm-lock conflicts - would require manual resolution"
+        return 0
+      fi
       echo "Merge conflict detected in a file other than pnpm-lock.yaml. Please resolve manually."
-      echo "$CONFLICT_FILES"
+      echo "$conflict_files"
       return 1
     fi
   done
+
+  if $dry_run; then
+    if [[ $iteration -eq 0 ]]; then
+      echo "ℹ️  No rebase in progress or no conflicts to resolve"
+    fi
+  fi
 }

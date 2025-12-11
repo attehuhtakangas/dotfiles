@@ -1,0 +1,204 @@
+# Remove unused git worktrees (those pointing to missing directories or gone branches)
+#
+# This function helps clean up worktrees that are no longer needed:
+#   - Worktrees whose directories have been deleted (prunable)
+#   - Worktrees whose branches have been deleted on remote ([gone])
+#
+# Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--help|-h]
+#
+# Options:
+#   --dry-run, -n    Show what would be removed without actually removing
+#   --yes, -y        Skip confirmation prompt
+#   --help, -h       Show this help message
+#
+git_prune_worktrees() {
+  # Parse arguments first to handle help
+  if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "git_prune_worktrees - Remove unused git worktrees"
+    echo ""
+    echo "Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--help|-h]"
+    echo ""
+    echo "Options:"
+    echo "  --dry-run, -n    Show what would be removed without actually removing"
+    echo "  --yes, -y        Skip confirmation prompt"
+    echo "  --help, -h       Show this help message"
+    echo ""
+    echo "This function removes:"
+    echo "  • Stale worktrees (directory no longer exists)"
+    echo "  • Worktrees with [gone] branches (deleted on remote)"
+    echo ""
+    echo "Examples:"
+    echo "  git_prune_worktrees --dry-run    # Preview what would be removed"
+    echo "  git_prune_worktrees              # Remove with confirmation"
+    echo "  git_prune_worktrees --yes        # Remove without confirmation"
+    echo "  gpw --dry-run                    # Using alias"
+    return 0
+  fi
+
+  # Safety: ensure we're in a git repository
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "❌ Error: Not in a git repository"
+    return 1
+  fi
+
+  local dry_run=false
+  local skip_confirm=false
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run|-n)
+        dry_run=true
+        shift
+        ;;
+      --yes|-y)
+        skip_confirm=true
+        shift
+        ;;
+      *)
+        echo "❌ Unknown option: $1"
+        echo "Run with --help for usage information"
+        return 1
+        ;;
+    esac
+  done
+
+  echo "🔍 Analyzing git worktrees..."
+  echo ""
+
+  # Arrays to collect worktrees to remove
+  local -a stale_worktrees=()
+  local -a gone_worktrees=()
+
+  # Step 1: Check for stale worktrees (directory doesn't exist)
+  echo "📋 Step 1: Finding stale worktrees (missing directories)..."
+  local stale_output=$(git worktree list --porcelain 2>/dev/null | grep -A2 "^worktree " | grep "prunable" -B2 | grep "^worktree " | sed 's/^worktree //')
+
+  if [[ -n "$stale_output" ]]; then
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && stale_worktrees+=("$path")
+    done <<< "$stale_output"
+  fi
+
+  # Step 2: Find worktrees with [gone] branches
+  echo "📋 Step 2: Finding worktrees with deleted remote branches..."
+
+  # First, fetch to update remote tracking info
+  git fetch --prune 2>/dev/null
+
+  # Get list of [gone] branches
+  local -a gone_branches=()
+  while IFS= read -r line; do
+    # Format: "  branch-name abc1234 [gone] message" or similar
+    local branch=$(echo "$line" | sed 's/^[* ]*//' | awk '{print $1}')
+    [[ -n "$branch" ]] && gone_branches+=("$branch")
+  done < <(git branch -vv 2>/dev/null | grep '\[.*: gone\]')
+
+  # Check if any worktrees use these branches
+  if [[ ${#gone_branches[@]} -gt 0 ]]; then
+    while IFS= read -r line; do
+      # Parse worktree list output
+      if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+        local wt_path="${match[1]}"
+      elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+        local wt_branch="${match[1]}"
+        # Check if this branch is in gone_branches
+        for gone in "${gone_branches[@]}"; do
+          if [[ "$wt_branch" == "$gone" ]]; then
+            # Don't add if already in stale list
+            local already_listed=false
+            for stale in "${stale_worktrees[@]}"; do
+              [[ "$stale" == "$wt_path" ]] && already_listed=true && break
+            done
+            [[ "$already_listed" == false ]] && gone_worktrees+=("$wt_path|$wt_branch")
+            break
+          fi
+        done
+      fi
+    done < <(git worktree list --porcelain 2>/dev/null)
+  fi
+
+  # Show results
+  echo ""
+  local total_count=$(( ${#stale_worktrees[@]} + ${#gone_worktrees[@]} ))
+
+  if [[ $total_count -eq 0 ]]; then
+    echo "✨ No unused worktrees to remove."
+    return 0
+  fi
+
+  echo "Found $total_count worktree(s) to remove:"
+  echo ""
+
+  if [[ ${#stale_worktrees[@]} -gt 0 ]]; then
+    echo "Stale worktrees (directory missing):"
+    for wt in "${stale_worktrees[@]}"; do
+      echo "  • $wt"
+    done
+  fi
+
+  if [[ ${#gone_worktrees[@]} -gt 0 ]]; then
+    echo "Worktrees with deleted remote branches:"
+    for entry in "${gone_worktrees[@]}"; do
+      local wt_path="${entry%%|*}"
+      local wt_branch="${entry##*|}"
+      echo "  • $wt_path (branch: $wt_branch)"
+    done
+  fi
+
+  echo ""
+
+  # Dry run: just show what would be removed
+  if [[ "$dry_run" == true ]]; then
+    echo "🔍 DRY RUN complete. Run without --dry-run to actually remove worktrees."
+    return 0
+  fi
+
+  # Ask for confirmation unless --yes was passed
+  if [[ "$skip_confirm" != true ]]; then
+    echo -n "Remove these $total_count worktree(s)? [y/N] "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+      echo "❌ Aborted."
+      return 0
+    fi
+  fi
+
+  echo ""
+  echo "🗑️  Removing worktrees..."
+
+  local removed_count=0
+
+  # Remove stale worktrees
+  for wt in "${stale_worktrees[@]}"; do
+    if git worktree prune 2>/dev/null; then
+      echo "  ✅ Pruned stale worktree: $wt"
+      ((removed_count++))
+    else
+      echo "  ⚠️  Failed to prune: $wt"
+    fi
+  done
+
+  # Remove worktrees with gone branches
+  for entry in "${gone_worktrees[@]}"; do
+    local wt_path="${entry%%|*}"
+    local wt_branch="${entry##*|}"
+
+    # Remove worktree (--force needed if dirty)
+    if git worktree remove "$wt_path" 2>/dev/null || git worktree remove --force "$wt_path" 2>/dev/null; then
+      echo "  ✅ Removed worktree: $wt_path"
+      ((removed_count++))
+
+      # Also delete the branch
+      if git branch -d "$wt_branch" 2>/dev/null || git branch -D "$wt_branch" 2>/dev/null; then
+        echo "     ✅ Deleted branch: $wt_branch"
+      fi
+    else
+      echo "  ⚠️  Failed to remove: $wt_path"
+    fi
+  done
+
+  echo ""
+  echo "🏁 Worktree cleanup complete!"
+  echo "   ✅ Removed $removed_count of $total_count worktree(s)"
+}

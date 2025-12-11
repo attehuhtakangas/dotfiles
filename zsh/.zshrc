@@ -124,7 +124,7 @@ zstyle :bracketed-paste-magic paste-finish pastefinish
 
 # Auto-load custom git functions
 fpath=(~/.zsh/functions $fpath)
-autoload -Uz git_prune_squash_merged git_list_squash_merged pr push_stack gt_stack_rebase
+autoload -Uz git_prune_squash_merged git_list_squash_merged git_prune_worktrees pr push_stack gt_stack_rebase
 
 # source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
@@ -169,6 +169,7 @@ alias venv="python3 -m venv .venv && source .venv/bin/activate"
 alias l="eza -lahF"
 # alias aws="op run --env-file=$HOME/.config/op/aws-env -- aws"
 alias gpsm="git_prune_squash_merged"
+alias gpw="git_prune_worktrees"
 alias gpm="git branch --merged | egrep -v \"(^\*|main)\" | xargs git branch -d"
 alias grom="git rebase origin/main"
 alias gpso="git pso"
