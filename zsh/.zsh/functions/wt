@@ -1,0 +1,34 @@
+# Git worktree helper - wraps create-worktree.sh and cd's to new worktree
+# Usage: wt <branch-name>
+wt() {
+  local script_path="$HOME/code/maze/maze-monorepo/scripts/create-worktree.sh"
+
+  if [[ "$1" == "--setup-alias" ]]; then
+    "$script_path" --setup-alias
+    return
+  fi
+
+  # Show usage if no arguments
+  if [[ $# -eq 0 ]]; then
+    "$script_path"
+    return
+  fi
+
+  local output=$("$script_path" "$@")
+  echo "$output"
+
+  # Extract the worktree path from the output
+  local worktree_path=$(echo "$output" | grep "Created and switched to new worktree at:" | sed 's/Created and switched to new worktree at: //')
+
+  # Change to the directory if we got a path
+  if [[ -n "$worktree_path" ]] && [[ -d "$worktree_path" ]]; then
+    cd "$worktree_path"
+
+    # Extract and run any Claude command from the output
+    local claude_command=$(echo "$output" | grep "💡 Tip: Run '" | sed "s/.*💡 Tip: Run '\\([^']*\\)'.*/\\1/")
+    if [[ -n "$claude_command" ]]; then
+      echo "Running: $claude_command"
+      eval "$claude_command"
+    fi
+  fi
+}
