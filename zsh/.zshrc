@@ -124,7 +124,7 @@ zstyle :bracketed-paste-magic paste-finish pastefinish
 
 # Auto-load custom git functions
 fpath=(~/.zsh/functions $fpath)
-autoload -Uz git_prune_squash_merged git_list_squash_merged git_prune_worktrees pr push_stack gt_stack_rebase
+autoload -Uz git_prune_squash_merged git_list_squash_merged git_prune_worktrees pr push_stack gt_stack_rebase wt
 
 # source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
@@ -358,7 +358,13 @@ if command -v mise &>/dev/null; then
   zsh-defer eval "$(/opt/homebrew/bin/mise activate zsh)"
 fi
 
-_evalcache starship init zsh
+# Disable Starship inside Warp only
+if [[ $TERM_PROGRAM != "WarpTerminal" ]]; then
+  _evalcache starship init zsh
+fi
+
+# zoxide - smarter cd command
+_evalcache zoxide init zsh
 
 # pnpm
 export PNPM_HOME="/Users/atte/Library/pnpm"
