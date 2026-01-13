@@ -3,11 +3,12 @@
 # This function uses git for-each-ref instead of parsing git branch output
 # to avoid issues with formatted output, worktrees, and special characters.
 #
-# Usage: git_prune_squash_merged [--dry-run|-n|--yes|-y|--help|-h]
+# Usage: git_prune_squash_merged [--dry-run|-n|--yes|-y|--rebase|--help|-h]
 #
 # Options:
 #   --dry-run, -n    Show what would be deleted without actually deleting
 #   --yes, -y        Skip confirmation prompt
+#   --rebase         Also detect rebase-merged and cherry-picked branches (via patch-id)
 #   --help, -h       Show this help message
 #
 # Protected branches: main, master, develop, production (and current branch)
