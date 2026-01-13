@@ -1,8 +1,9 @@
-# Remove unused git worktrees (those pointing to missing directories or gone branches)
+# Remove unused git worktrees (those pointing to missing directories, gone branches, or merged branches)
 #
 # This function helps clean up worktrees that are no longer needed:
 #   - Worktrees whose directories have been deleted (prunable)
 #   - Worktrees whose branches have been deleted on remote ([gone])
+#   - Worktrees whose branches have been merged to main (including squash-merged)
 #
 # Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--help|-h]
 #
@@ -26,6 +27,7 @@ git_prune_worktrees() {
     echo "This function removes:"
     echo "  • Stale worktrees (directory no longer exists)"
     echo "  • Worktrees with [gone] branches (deleted on remote)"
+    echo "  • Worktrees with branches merged to main (including squash-merged)"
     echo ""
     echo "Examples:"
     echo "  git_prune_worktrees --dry-run    # Preview what would be removed"
@@ -69,6 +71,7 @@ git_prune_worktrees() {
   # Arrays to collect worktrees to remove
   local -a stale_worktrees=()
   local -a gone_worktrees=()
+  local -a merged_worktrees=()
 
   # Step 1: Check for stale worktrees (directory doesn't exist)
   echo "📋 Step 1: Finding stale worktrees (missing directories)..."
@@ -118,9 +121,64 @@ git_prune_worktrees() {
     done < <(git worktree list --porcelain 2>/dev/null)
   fi
 
+  # Step 3: Find worktrees with branches merged to main (including squash-merged)
+  echo "📋 Step 3: Finding worktrees with branches merged to main..."
+
+  # Build a set of already-found worktree paths to avoid duplicates
+  local -A already_found=()
+  for wt in "${stale_worktrees[@]}"; do
+    already_found["$wt"]=1
+  done
+  for entry in "${gone_worktrees[@]}"; do
+    already_found["${entry%%|*}"]=1
+  done
+
+  # Parse worktree list to get path->branch mapping
+  local -A worktree_branches=()
+  local current_wt_path=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+      current_wt_path="${match[1]}"
+    elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+      local wt_branch="${match[1]}"
+      # Skip main worktree and already-found worktrees
+      if [[ -n "$current_wt_path" && -z "${already_found[$current_wt_path]}" ]]; then
+        worktree_branches["$current_wt_path"]="$wt_branch"
+      fi
+    fi
+  done < <(git worktree list --porcelain 2>/dev/null)
+
+  # Check each worktree branch for merge status
+  for wt_path in "${(@k)worktree_branches}"; do
+    local branch="${worktree_branches[$wt_path]}"
+
+    # Skip protected branches
+    [[ "$branch" == "main" || "$branch" == "master" ]] && continue
+
+    local is_merged=false
+
+    # Check if normally merged to main
+    if git merge-base --is-ancestor "$branch" main 2>/dev/null; then
+      is_merged=true
+    else
+      # Check if squash-merged to main
+      local merge_base=$(git merge-base main "$branch" 2>/dev/null)
+      if [[ -n "$merge_base" ]]; then
+        local commit_tree=$(git commit-tree $(git rev-parse "$branch^{tree}") -p "$merge_base" -m "_" 2>/dev/null)
+        if [[ -n "$commit_tree" ]] && [[ $(git cherry main "$commit_tree" 2>/dev/null) == "-"* ]]; then
+          is_merged=true
+        fi
+      fi
+    fi
+
+    if [[ "$is_merged" == true ]]; then
+      merged_worktrees+=("$wt_path|$branch")
+    fi
+  done
+
   # Show results
   echo ""
-  local total_count=$(( ${#stale_worktrees[@]} + ${#gone_worktrees[@]} ))
+  local total_count=$(( ${#stale_worktrees[@]} + ${#gone_worktrees[@]} + ${#merged_worktrees[@]} ))
 
   if [[ $total_count -eq 0 ]]; then
     echo "✨ No unused worktrees to remove."
@@ -140,6 +198,15 @@ git_prune_worktrees() {
   if [[ ${#gone_worktrees[@]} -gt 0 ]]; then
     echo "Worktrees with deleted remote branches:"
     for entry in "${gone_worktrees[@]}"; do
+      local wt_path="${entry%%|*}"
+      local wt_branch="${entry##*|}"
+      echo "  • $wt_path (branch: $wt_branch)"
+    done
+  fi
+
+  if [[ ${#merged_worktrees[@]} -gt 0 ]]; then
+    echo "Worktrees with branches merged to main:"
+    for entry in "${merged_worktrees[@]}"; do
       local wt_path="${entry%%|*}"
       local wt_branch="${entry##*|}"
       echo "  • $wt_path (branch: $wt_branch)"
@@ -190,6 +257,25 @@ git_prune_worktrees() {
       ((removed_count++))
 
       # Also delete the branch
+      if git branch -d "$wt_branch" 2>/dev/null || git branch -D "$wt_branch" 2>/dev/null; then
+        echo "     ✅ Deleted branch: $wt_branch"
+      fi
+    else
+      echo "  ⚠️  Failed to remove: $wt_path"
+    fi
+  done
+
+  # Remove worktrees with merged branches
+  for entry in "${merged_worktrees[@]}"; do
+    local wt_path="${entry%%|*}"
+    local wt_branch="${entry##*|}"
+
+    # Remove worktree (--force needed if dirty)
+    if git worktree remove "$wt_path" 2>/dev/null || git worktree remove --force "$wt_path" 2>/dev/null; then
+      echo "  ✅ Removed worktree: $wt_path"
+      ((removed_count++))
+
+      # Also delete the branch (use -D for squash-merged branches)
       if git branch -d "$wt_branch" 2>/dev/null || git branch -D "$wt_branch" 2>/dev/null; then
         echo "     ✅ Deleted branch: $wt_branch"
       fi
