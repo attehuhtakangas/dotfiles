@@ -70,6 +70,7 @@ $HOME/.local/bin:\
 /opt/homebrew/sbin:\
 /Users/$USER/bin:\
 /Users/ahuh/code/flutter/bin:\
+/Users/atte/.bun/bin:\
 $PATH"
 
 # Which plugins would you like to load? (plugins can be found in ~/.oh-my-zsh/plugins/*)
@@ -374,4 +375,7 @@ case ":$PATH:" in
 esac
 # pnpm end
 
-alias claude="/Users/atte/.claude/local/claude"
+
+# peon-ping quick controls
+alias peon="bash /Users/atte/.claude/hooks/peon-ping/peon.sh"
+[ -f /Users/atte/.claude/hooks/peon-ping/completions.bash ] && source /Users/atte/.claude/hooks/peon-ping/completions.bash

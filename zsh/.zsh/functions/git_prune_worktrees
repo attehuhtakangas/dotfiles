@@ -5,11 +5,15 @@
 #   - Worktrees whose branches have been deleted on remote ([gone])
 #   - Worktrees whose branches have been merged to main (including squash-merged)
 #
-# Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--help|-h]
+# By default, an interactive fzf picker lets you select which worktrees to remove.
+# Dirty worktrees (uncommitted changes or stashes) are marked in the picker.
+#
+# Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--force|-f|--help|-h]
 #
 # Options:
 #   --dry-run, -n    Show what would be removed without actually removing
-#   --yes, -y        Skip confirmation prompt
+#   --yes, -y        Skip interactive selection, remove all candidates
+#   --force, -f      Force removal of worktrees (passes --force to git worktree remove)
 #   --help, -h       Show this help message
 #
 git_prune_worktrees() {
@@ -17,34 +21,41 @@ git_prune_worktrees() {
   if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     echo "git_prune_worktrees - Remove unused git worktrees"
     echo ""
-    echo "Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--help|-h]"
+    echo "Usage: git_prune_worktrees [--dry-run|-n|--yes|-y|--force|-f|--help|-h]"
     echo ""
     echo "Options:"
     echo "  --dry-run, -n    Show what would be removed without actually removing"
-    echo "  --yes, -y        Skip confirmation prompt"
+    echo "  --yes, -y        Skip interactive selection, remove all candidates"
+    echo "  --force, -f      Force removal of worktrees (passes --force to git worktree remove)"
     echo "  --help, -h       Show this help message"
     echo ""
     echo "This function removes:"
-    echo "  • Stale worktrees (directory no longer exists)"
-    echo "  • Worktrees with [gone] branches (deleted on remote)"
-    echo "  • Worktrees with branches merged to main (including squash-merged)"
+    echo "  - Stale worktrees (directory no longer exists)"
+    echo "  - Worktrees with [gone] branches (deleted on remote)"
+    echo "  - Worktrees with branches merged to main (including squash-merged)"
+    echo ""
+    echo "By default, an interactive fzf picker lets you select which worktrees"
+    echo "to remove. Use Tab to toggle selection, Enter to confirm."
     echo ""
     echo "Examples:"
+    echo "  git_prune_worktrees              # Interactive selection with fzf"
     echo "  git_prune_worktrees --dry-run    # Preview what would be removed"
-    echo "  git_prune_worktrees              # Remove with confirmation"
-    echo "  git_prune_worktrees --yes        # Remove without confirmation"
+    echo "  git_prune_worktrees --yes        # Remove all without selection"
+    echo "  git_prune_worktrees --force      # Force removal of stubborn worktrees"
+    echo "  git_prune_worktrees -y -f        # Skip selection + force removal"
     echo "  gpw --dry-run                    # Using alias"
     return 0
   fi
 
   # Safety: ensure we're in a git repository
   if ! git rev-parse --git-dir > /dev/null 2>&1; then
-    echo "❌ Error: Not in a git repository"
+    echo "Error: Not in a git repository"
     return 1
   fi
 
   local dry_run=false
   local skip_confirm=false
+  local force=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -57,15 +68,19 @@ git_prune_worktrees() {
         skip_confirm=true
         shift
         ;;
+      --force|-f)
+        force=true
+        shift
+        ;;
       *)
-        echo "❌ Unknown option: $1"
+        echo "Unknown option: $1"
         echo "Run with --help for usage information"
         return 1
         ;;
     esac
   done
 
-  echo "🔍 Analyzing git worktrees..."
+  echo "Analyzing git worktrees..."
   echo ""
 
   # Arrays to collect worktrees to remove
@@ -74,25 +89,22 @@ git_prune_worktrees() {
   local -a merged_worktrees=()
 
   # Step 1: Check for stale worktrees (directory doesn't exist)
-  echo "📋 Step 1: Finding stale worktrees (missing directories)..."
   local stale_output=$(git worktree list --porcelain 2>/dev/null | grep -A2 "^worktree " | grep "prunable" -B2 | grep "^worktree " | sed 's/^worktree //')
 
   if [[ -n "$stale_output" ]]; then
     while IFS= read -r path; do
+      path="${path//\"/}"
       [[ -n "$path" ]] && stale_worktrees+=("$path")
     done <<< "$stale_output"
   fi
 
   # Step 2: Find worktrees with [gone] branches
-  echo "📋 Step 2: Finding worktrees with deleted remote branches..."
-
-  # First, fetch to update remote tracking info
+  # Fetch to update remote tracking info
   git fetch --prune 2>/dev/null
 
   # Get list of [gone] branches
   local -a gone_branches=()
   while IFS= read -r line; do
-    # Format: "  branch-name abc1234 [gone] message" or similar
     local branch=$(echo "$line" | sed 's/^[* ]*//' | awk '{print $1}')
     [[ -n "$branch" ]] && gone_branches+=("$branch")
   done < <(git branch -vv 2>/dev/null | grep '\[.*: gone\]')
@@ -100,15 +112,12 @@ git_prune_worktrees() {
   # Check if any worktrees use these branches
   if [[ ${#gone_branches[@]} -gt 0 ]]; then
     while IFS= read -r line; do
-      # Parse worktree list output
       if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
-        local wt_path="${match[1]}"
+        local wt_path="${match[1]//\"/}"
       elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
         local wt_branch="${match[1]}"
-        # Check if this branch is in gone_branches
         for gone in "${gone_branches[@]}"; do
           if [[ "$wt_branch" == "$gone" ]]; then
-            # Don't add if already in stale list
             local already_listed=false
             for stale in "${stale_worktrees[@]}"; do
               [[ "$stale" == "$wt_path" ]] && already_listed=true && break
@@ -122,8 +131,6 @@ git_prune_worktrees() {
   fi
 
   # Step 3: Find worktrees with branches merged to main (including squash-merged)
-  echo "📋 Step 3: Finding worktrees with branches merged to main..."
-
   # Build a set of already-found worktree paths to avoid duplicates
   local -A already_found=()
   for wt in "${stale_worktrees[@]}"; do
@@ -138,10 +145,9 @@ git_prune_worktrees() {
   local current_wt_path=""
   while IFS= read -r line; do
     if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
-      current_wt_path="${match[1]}"
+      current_wt_path="${match[1]//\"/}"
     elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
       local wt_branch="${match[1]}"
-      # Skip main worktree and already-found worktrees
       if [[ -n "$current_wt_path" && -z "${already_found[$current_wt_path]}" ]]; then
         worktree_branches["$current_wt_path"]="$wt_branch"
       fi
@@ -151,17 +157,12 @@ git_prune_worktrees() {
   # Check each worktree branch for merge status
   for wt_path in "${(@k)worktree_branches}"; do
     local branch="${worktree_branches[$wt_path]}"
-
-    # Skip protected branches
     [[ "$branch" == "main" || "$branch" == "master" ]] && continue
 
     local is_merged=false
-
-    # Check if normally merged to main
     if git merge-base --is-ancestor "$branch" main 2>/dev/null; then
       is_merged=true
     else
-      # Check if squash-merged to main
       local merge_base=$(git merge-base main "$branch" 2>/dev/null)
       if [[ -n "$merge_base" ]]; then
         local commit_tree=$(git commit-tree $(git rev-parse "$branch^{tree}") -p "$merge_base" -m "_" 2>/dev/null)
@@ -176,115 +177,166 @@ git_prune_worktrees() {
     fi
   done
 
-  # Show results
-  echo ""
-  local total_count=$(( ${#stale_worktrees[@]} + ${#gone_worktrees[@]} + ${#merged_worktrees[@]} ))
+  # Step 4: Detect dirty worktrees and associated stashes
+  local -A dirty_worktrees=()
+  local -A stash_counts=()
+
+  for entry in "${gone_worktrees[@]}" "${merged_worktrees[@]}"; do
+    local wt_path="${entry%%|*}"
+    local wt_branch="${entry##*|}"
+
+    if [[ -d "$wt_path" ]]; then
+      local porcelain_output=$(git -C "$wt_path" status --porcelain 2>/dev/null)
+      if [[ -n "$porcelain_output" ]]; then
+        dirty_worktrees[$wt_path]=$(echo "$porcelain_output" | wc -l | tr -d ' ')
+      fi
+    fi
+
+    if git stash list 2>/dev/null | grep -qF "On ${wt_branch}:"; then
+      stash_counts[$wt_path]=$(git stash list 2>/dev/null | grep -cF "On ${wt_branch}:")
+    fi
+  done
+
+  # Build unified list of all candidates
+  # Format: "path|branch|category" (branch is empty for stale)
+  local -a all_candidates=()
+  for wt in "${stale_worktrees[@]}"; do
+    all_candidates+=("$wt||stale")
+  done
+  for entry in "${gone_worktrees[@]}"; do
+    all_candidates+=("${entry}|gone")
+  done
+  for entry in "${merged_worktrees[@]}"; do
+    all_candidates+=("${entry}|merged")
+  done
+
+  local total_count=${#all_candidates[@]}
 
   if [[ $total_count -eq 0 ]]; then
-    echo "✨ No unused worktrees to remove."
+    echo "No unused worktrees to remove."
     return 0
   fi
 
-  echo "Found $total_count worktree(s) to remove:"
+  echo "Found $total_count worktree(s) to remove."
   echo ""
 
-  if [[ ${#stale_worktrees[@]} -gt 0 ]]; then
-    echo "Stale worktrees (directory missing):"
-    for wt in "${stale_worktrees[@]}"; do
-      echo "  • $wt"
-    done
-  fi
+  # Build display lines for fzf (or dry-run listing)
+  # Each line: "[category] branch-name  path  indicators"
+  # We use tab as delimiter so fzf can extract the path
+  local -a display_lines=()
+  for candidate in "${all_candidates[@]}"; do
+    local wt_path="${candidate%%|*}"
+    local remainder="${candidate#*|}"
+    local wt_branch="${remainder%%|*}"
+    local category="${remainder##*|}"
 
-  if [[ ${#gone_worktrees[@]} -gt 0 ]]; then
-    echo "Worktrees with deleted remote branches:"
-    for entry in "${gone_worktrees[@]}"; do
-      local wt_path="${entry%%|*}"
-      local wt_branch="${entry##*|}"
-      echo "  • $wt_path (branch: $wt_branch)"
-    done
-  fi
+    local indicators=""
+    [[ -n "${dirty_worktrees[$wt_path]}" ]] && indicators+=" !! DIRTY(${dirty_worktrees[$wt_path]})"
+    [[ -n "${stash_counts[$wt_path]}" ]] && indicators+=" STASH(${stash_counts[$wt_path]})"
 
-  if [[ ${#merged_worktrees[@]} -gt 0 ]]; then
-    echo "Worktrees with branches merged to main:"
-    for entry in "${merged_worktrees[@]}"; do
-      local wt_path="${entry%%|*}"
-      local wt_branch="${entry##*|}"
-      echo "  • $wt_path (branch: $wt_branch)"
-    done
-  fi
+    local dir_name="${wt_path:t}"
+    case "$category" in
+      stale)
+        display_lines+=("[stale]   ${dir_name}  ${wt_path}")
+        ;;
+      gone)
+        display_lines+=("[gone]    ${wt_branch}  ${wt_path}${indicators}")
+        ;;
+      merged)
+        display_lines+=("[merged]  ${wt_branch}  ${wt_path}${indicators}")
+        ;;
+    esac
+  done
 
-  echo ""
-
-  # Dry run: just show what would be removed
+  # Dry run: show list and exit
   if [[ "$dry_run" == true ]]; then
-    echo "🔍 DRY RUN complete. Run without --dry-run to actually remove worktrees."
+    for line in "${display_lines[@]}"; do
+      echo "  $line"
+    done
+    echo ""
+    echo "DRY RUN complete. Run without --dry-run to actually remove worktrees."
     return 0
   fi
 
-  # Ask for confirmation unless --yes was passed
-  if [[ "$skip_confirm" != true ]]; then
-    echo -n "Remove these $total_count worktree(s)? [y/N] "
-    read -r response
-    if [[ ! "$response" =~ ^[Yy]$ ]]; then
-      echo "❌ Aborted."
+  # Determine which candidates to remove
+  local -a selected_indices=()
+
+  if [[ "$skip_confirm" == true ]]; then
+    # --yes: select all
+    for i in {1..$total_count}; do
+      selected_indices+=($i)
+    done
+  else
+    # Interactive fzf selection
+    if ! command -v fzf > /dev/null 2>&1; then
+      echo "fzf is not installed. Use --yes to skip interactive selection."
+      return 1
+    fi
+
+    local fzf_output
+    fzf_output=$(printf '%s\n' "${display_lines[@]}" | \
+      fzf --multi \
+          --bind 'start:select-all' \
+          --header 'Tab: toggle | Shift-Tab: toggle up | Enter: confirm | Esc: cancel' \
+          --reverse \
+          --height 80% \
+          --no-sort)
+
+    if [[ -z "$fzf_output" ]]; then
+      echo "No worktrees selected. Aborted."
       return 0
     fi
+
+    # Match selected lines back to candidate indices
+    while IFS= read -r selected_line; do
+      for i in {1..$total_count}; do
+        if [[ "${display_lines[$i]}" == "$selected_line" ]]; then
+          selected_indices+=($i)
+          break
+        fi
+      done
+    done <<< "$fzf_output"
   fi
 
+  local selected_count=${#selected_indices[@]}
   echo ""
-  echo "🗑️  Removing worktrees..."
+  echo "Removing $selected_count worktree(s)..."
 
   local removed_count=0
 
-  # Remove stale worktrees
-  for wt in "${stale_worktrees[@]}"; do
-    if git worktree prune 2>/dev/null; then
-      echo "  ✅ Pruned stale worktree: $wt"
-      ((removed_count++))
-    else
-      echo "  ⚠️  Failed to prune: $wt"
-    fi
-  done
+  for idx in "${selected_indices[@]}"; do
+    local candidate="${all_candidates[$idx]}"
+    local wt_path="${candidate%%|*}"
+    local remainder="${candidate#*|}"
+    local wt_branch="${remainder%%|*}"
+    local category="${remainder##*|}"
 
-  # Remove worktrees with gone branches
-  for entry in "${gone_worktrees[@]}"; do
-    local wt_path="${entry%%|*}"
-    local wt_branch="${entry##*|}"
+    # Strip any stray quotes from path
+    wt_path="${wt_path//\"/}"
 
-    # Remove worktree (--force needed if dirty)
-    if git worktree remove "$wt_path" 2>/dev/null || git worktree remove --force "$wt_path" 2>/dev/null; then
-      echo "  ✅ Removed worktree: $wt_path"
-      ((removed_count++))
-
-      # Also delete the branch
-      if git branch -d "$wt_branch" 2>/dev/null || git branch -D "$wt_branch" 2>/dev/null; then
-        echo "     ✅ Deleted branch: $wt_branch"
+    if [[ "$category" == "stale" ]]; then
+      if git worktree prune 2>/dev/null; then
+        echo "  Pruned stale worktree: $wt_path"
+        ((removed_count++))
+      else
+        echo "  Failed to prune: $wt_path"
       fi
     else
-      echo "  ⚠️  Failed to remove: $wt_path"
-    fi
-  done
+      local remove_cmd=(git worktree remove)
+      [[ "$force" == true ]] && remove_cmd+=(--force)
+      if "${remove_cmd[@]}" "$wt_path" 2>/dev/null; then
+        echo "  Removed: ${wt_branch} ($wt_path)"
+        ((removed_count++))
 
-  # Remove worktrees with merged branches
-  for entry in "${merged_worktrees[@]}"; do
-    local wt_path="${entry%%|*}"
-    local wt_branch="${entry##*|}"
-
-    # Remove worktree (--force needed if dirty)
-    if git worktree remove "$wt_path" 2>/dev/null || git worktree remove --force "$wt_path" 2>/dev/null; then
-      echo "  ✅ Removed worktree: $wt_path"
-      ((removed_count++))
-
-      # Also delete the branch (use -D for squash-merged branches)
-      if git branch -d "$wt_branch" 2>/dev/null || git branch -D "$wt_branch" 2>/dev/null; then
-        echo "     ✅ Deleted branch: $wt_branch"
+        if git branch -d "$wt_branch" 2>/dev/null || git branch -D "$wt_branch" 2>/dev/null; then
+          echo "    Deleted branch: $wt_branch"
+        fi
+      else
+        echo "  Failed to remove: $wt_path"
       fi
-    else
-      echo "  ⚠️  Failed to remove: $wt_path"
     fi
   done
 
   echo ""
-  echo "🏁 Worktree cleanup complete!"
-  echo "   ✅ Removed $removed_count of $total_count worktree(s)"
+  echo "Done! Removed $removed_count of $selected_count worktree(s)."
 }
